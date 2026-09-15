@@ -213,6 +213,10 @@ function NextStep(
           - If your code does not compile, the runtime asks a repair step to fix it; you will see the fixed code and its outcome.
           - Prefer one execution that does the whole job over many tiny ones. Discovery first, then one execution that acts.
           - When you are asked to build a tool, define the functions, test them in the same run(), then codemode.publish() them.
+          - A service with no connector (a public API, Exa, Slack, a database, anything reachable over HTTP) is NOT a reason
+            to give up: build the tool yourself with baml.http.fetch (API keys via codemode.env.get, which pauses to ask the
+            user), prove it works in the same run(), then codemode.publish() it. Never answer that a connector must be
+            added on the host side.
           - When the latest user message is answered (or truly impossible), set action = Answer instead of more code.
 
         BAML language reference (authoritative; prefer it over memory):
@@ -297,7 +301,7 @@ class App {
     }
     function world(self) -> json throws never {
         j(
-            self.runtime.connectors.map((c) -> {
+            self.runtime.root.all().map((c) -> {
                 WorldView { name: c.name(), world: c.world() }
             }),
         )
@@ -442,18 +446,28 @@ class App {
             self.touch(s);
             //# One LLM call: the return type is the codemode tool contract
             let history = render_history(s.messages, s.turns);
-            let step = NextStep(
-                history,
-                self.runtime.connector_names(),
-                render_tools(self.runtime.snippets),
-                self.runtime.reference,
-            ) catch_all (e, ctx) {
-                _ => {
+            let connectors = self.runtime.connector_names();
+            let tools = render_tools(self.runtime.snippets);
+            let reference = self.runtime.reference;
+            //# On its own green thread so a panic inside the toolchain is captured too;
+            //# otherwise this thread would die and the session would stay "thinking" forever.
+            let settled = await baml.future.all_settled([
+                spawn { NextStep(history, connectors, tools, reference) },
+            ]);
+            let step = match (settled[0]) {
+                let ok: baml.future.Success<AgentStep> => ok.value,
+                let p: baml.future.Panicked => {
                     s.status = "error";
-                    s.answer = `model call failed: ${ctx.to_string()}`;
+                    s.answer = `model call panicked: ${p.panic}`;
                     self.touch(s);
                     return;
-                }
+                },
+                _ => {
+                    s.status = "error";
+                    s.answer = `model call failed: ${settled[0]}`;
+                    self.touch(s);
+                    return;
+                },
             };
             s.thought = step.thought;
             let code = step.code ?? "";
@@ -554,7 +568,7 @@ class App {
 }
 
 function build_app() -> App {
-    let rt = create_runtime([seed_crm(), seed_billing(), Email { sent: [] }, Github {  }]);
+    let rt = create_runtime();
     rt.reference = load_reference();
     let app = App {
         runtime: rt,

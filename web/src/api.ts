@@ -3,8 +3,7 @@
 
 export type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 
-export type MethodSpec = { connector: string; name: string; description: string; requires_approval: boolean; replay: "Record" | "Reexecute"; reversible: boolean };
-export type ConnectorView = { name: string; description: string; methods: MethodSpec[]; api: string; world: Json };
+export type ConnectorView = { name: string; description: string; api: string; world: Json };
 export type LogEntry = {
   seq: number; kind: "call" | "step"; connector: string; method: string; args: Json;
   state: "Pending" | "Approved" | "Executing" | "Applied" | "Rejected" | "Reverted" | "RevertFailed";

@@ -34,7 +34,6 @@ class ToolView {
 class ConnectorView {
     name: string,
     description: string,
-    methods: MethodSpec[],
     api: string @description("BAML declarations, as codemode.describe() renders them"),
     world: json,
 }
@@ -71,57 +70,29 @@ function tool_detail(app: App, name: string) -> ToolDetail? {
 
 function state_view(app: App) -> StateView {
     let rt = app.runtime;
-    //# A scratch Codemode instance just to render each connector's API by reflection
-    let probe = new_codemode(
-        rt,
-        Execution {
-            id: "probe",
-            task: "",
-            code: "",
-            status: ExecutionStatus.Error,
-            log: [],
-            result: null,
-            error: null,
-            logs: [],
-            connectors: [],
-            pass_count: 0,
-            cursor: 0,
-            fix_log: [],
-            discovered: [],
-            publish_as: null,
-            publish_description: null,
-            created_at: "",
-            updated_at: "",
-        },
-    );
-    let connectors = rt.connectors.map((c) -> {
+    let connectors = rt.root.all().map((c) -> {
         ConnectorView {
             name: c.name(),
             description: c.description(),
-            methods: c.methods(),
-            api: rt.describe(probe, c.name()),
+            api: rt.describe(c.name()),
             world: c.world(),
         }
     });
     //# Tools by reflection: every connector method's live signature + docstring, then snippet packages
     let tools: ToolView[] = [];
-    for (let c in rt.connectors) {
-        let specs = c.methods();
-        for (let sg in probe.api(c.name())) {
-            let spec = specs.find((m) -> {
-                m.name == sg.name
-            });
+    for (let c in rt.root.all()) {
+        for (let t in c.tools()) {
             tools.push(
                 ToolView {
-                    path: `${c.name()}.${sg.name ?? "?"}`,
+                    path: `${c.name()}.${t.name()}`,
                     connector: c.name(),
-                    name: sg.name ?? "?",
+                    name: t.name(),
                     kind: "method",
-                    signature: signature_line(sg),
-                    docstring: sg.docstring,
-                    requires_approval: spec?.requires_approval ?? false,
-                    reversible: spec?.reversible ?? false,
-                    replay: spec?.replay ?? ReplayPolicy.Record,
+                    signature: signature_line(t.sig),
+                    docstring: t.sig.docstring,
+                    requires_approval: t.requires_approval,
+                    reversible: t.reversible(),
+                    replay: t.replay,
                 },
             );
         }
@@ -162,7 +133,7 @@ function state_view(app: App) -> StateView {
             snippets: rt.snippets,
             connectors: connectors,
             tools: tools,
-            env: rt.env.vars.keys(),
+            env: rt.env().vars.keys(),
         },
         sessions: app.sessions.reverse(),
         started_at: app.started_at,
@@ -409,7 +380,7 @@ function handle(app: App, req: baml.http.Request) -> baml.http.Response {
 
     // Env vault: names are public, values are write-only.
     if (method == "GET" && path == "/api/env") {
-        return respond(200, app.runtime.env.vars.keys());
+        return respond(200, app.runtime.env().vars.keys());
     }
     if (parts.length() == 3 && parts[0] == "api" && parts[1] == "env") {
         let name = parts[2];

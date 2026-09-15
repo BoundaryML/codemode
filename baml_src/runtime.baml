@@ -145,7 +145,7 @@ interface RuntimeListener {
 
 class Runtime {
     name: string,
-    connectors: Connector[],
+    root: Registry @description("every connector, unbound; each execution gets a bound copy"),
     executions: Execution[],
     snippets: Snippet[],
     max_executions: int,
@@ -155,23 +155,23 @@ class Runtime {
     max_fixes: int,
     packages: map<string, reflect.Package>,
     reference: string @description("BAML language reference text handed to the code generator"),
-    env: Env,
 
     // ───────────── lookups ─────────────
+    function connectors(self) -> Connector[] throws never {
+        self.root.all()
+    }
     function connector(self, name: string) -> Connector? throws never {
-        self.connectors.find((c) -> {
+        self.root.all().find((c) -> {
             c.name() == name
         })
     }
-    function method(self, connector: string, method: string) -> MethodSpec? throws never {
-        self.connector(connector)?.methods().find((m) -> {
-            m.name == method
+    function tool(self, connector: string, method: string) -> Tool? throws never {
+        self.connector(connector)?.tools().find((t) -> {
+            t.name() == method
         })
     }
-    function all_methods(self) -> MethodSpec[] throws never {
-        self.connectors.flat_map((c) -> {
-            c.methods()
-        })
+    function env(self) -> Env throws never {
+        self.root.env()
     }
     function execution(self, id: string) -> Execution? throws never {
         self.executions.find((e) -> {
@@ -184,7 +184,7 @@ class Runtime {
         })
     }
     function connector_names(self) -> string[] throws never {
-        self.connectors.map((c) -> {
+        self.root.all().map((c) -> {
             c.name()
         })
     }
@@ -200,31 +200,34 @@ class Runtime {
             t.length() > 0
         });
         let hits: SearchHit[] = [];
-        for (let m in self.all_methods()) {
-            let hay = `${m.path()} ${m.description}`.to_lower_case();
-            let score = terms.reduce(
-                (acc, t) -> {
-                    if (m.path().to_lower_case().includes(t)) {
-                        acc + 3
-                    } else if (hay.includes(t)) {
-                        acc + 1
-                    } else {
-                        acc
-                    }
-                },
-                0,
-            );
-            if (score > 0 || terms.length() == 0) {
-                hits.push(
-                    SearchHit {
-                        path: m.path(),
-                        connector: m.connector,
-                        method: m.name,
-                        description: m.description,
-                        kind: "method",
-                        score: score,
+        for (let c in self.root.all()) {
+            for (let t in c.tools()) {
+                let path = `${c.name()}.${t.name()}`;
+                let hay = `${path} ${t.description()}`.to_lower_case();
+                let score = terms.reduce(
+                    (acc, term) -> {
+                        if (path.to_lower_case().includes(term)) {
+                            acc + 3
+                        } else if (hay.includes(term)) {
+                            acc + 1
+                        } else {
+                            acc
+                        }
                     },
+                    0,
                 );
+                if (score > 0 || terms.length() == 0) {
+                    hits.push(
+                        SearchHit {
+                            path: path,
+                            connector: c.name(),
+                            method: t.name(),
+                            description: t.description(),
+                            kind: "method",
+                            score: score,
+                        },
+                    );
+                }
             }
         }
         for (let s in self.snippets) {
@@ -265,7 +268,7 @@ class Runtime {
     }
 
     /// BAML declarations for a connector, a method, or a snippet — rendered by reflection.
-    function describe(self, cm: Codemode, target: string) -> string throws never {
+    function describe(self, target: string) -> string throws never {
         let parts = target.split(".");
         let connector = parts[0];
         let c = self.connector(connector);
@@ -275,53 +278,10 @@ class Runtime {
             } else {
                 ""
             };
-            let sigs = cm.api(connector).filter((s) -> {
-                wanted == "" || s.name == wanted
-            });
-            if (sigs.length() == 0) {
+            if (wanted != "" && self.tool(connector, wanted) == null) {
                 return `// ${connector} has no method ${wanted}; try codemode.search()`;
             }
-            let flags = c.methods()
-                .filter((m) -> {
-                    wanted == "" || m.name == wanted
-                })
-                .map((m) -> {
-                    let f = [
-                        if (m.requires_approval) {
-                            "requires approval"
-                        } else {
-                            ""
-                        },
-                        if (m.reversible) {
-                            "reversible"
-                        } else {
-                            ""
-                        },
-                        if (m.replay == ReplayPolicy.Reexecute) {
-                            "re-executed on replay"
-                        } else {
-                            ""
-                        },
-                    ]
-                        .filter((x) -> {
-                            x.length() > 0
-                        });
-                    if (f.length() > 0) {
-                        `// ${m.name}: ${f.join(", ")}`
-                    } else {
-                        ""
-                    }
-                })
-                .filter((x) -> {
-                    x.length() > 0
-                });
-            let types = cm.api_types(connector).map((t) -> {
-                render_class(t)
-            });
-            let body = sigs.map((s) -> {
-                render_signature(s)
-            });
-            return `// use as: codemode.${connector}.<method>(...)   (keyword args: name = value)\n${flags.join("\n")}\nclass ${connector} {\n${body.join("\n")}\n}\n\n${types.join("\n\n")}`;
+            return render_connector(c, wanted);
         }
         let s = self.snippet(target);
         if (s != null) {
@@ -387,7 +347,7 @@ class Runtime {
         self.persist();
         self.notify(exec);
         defer {
-            for (let c in self.connectors) {
+            for (let c in self.root.all()) {
                 c.on_pass_end(exec.id);
             }
         }
@@ -418,7 +378,7 @@ class Runtime {
                         );
                         let hints = self.connector_names()
                             .map((c) -> {
-                                self.describe(new_codemode(self, exec), c)
+                                self.describe(c)
                             })
                             .join("\n\n");
                         let fix = FixCode(exec.code, details, self.connector_names(), hints, self.reference) catch_all (err, ctx) {
@@ -632,16 +592,17 @@ class Runtime {
                 skipped.push(`#${e.seq} ${e.connector}.${e.method}: connector unavailable`);
                 continue;
             }
-            let m = self.method(e.connector, e.method);
-            if (m == null) {
+            let t = self.tool(e.connector, e.method);
+            if (t == null) {
                 skipped.push(`#${e.seq} ${e.connector}.${e.method}: unknown method`);
                 continue;
             }
-            if (!m.reversible) {
+            let revert = t.revert;
+            if (revert == null) {
                 skipped.push(`#${e.seq} ${e.connector}.${e.method}: no revert`);
                 continue;
             }
-            if (c.revert(e.method, e.args, e.result, exec.id)) {
+            if (revert(e.args, e.result)) {
                 e.state = CallState.Reverted;
                 reverted += 1;
             } else {
@@ -653,7 +614,7 @@ class Runtime {
             exec.status = ExecutionStatus.RolledBack;
         }
         exec.updated_at = baml.time.Instant.now().to_string();
-        for (let c in self.connectors) {
+        for (let c in self.root.all()) {
             c.dispose_execution(exec.id);
         }
         self.persist();
@@ -819,8 +780,8 @@ class Runtime {
     /// Replace every stored secret value with «ENV:NAME».
     function scrub(self, text: string) -> string throws never {
         let out = text;
-        for (let k in self.env.vars.keys()) {
-            let v = self.env.vars.get(k) ?? "";
+        for (let k in self.env().vars.keys()) {
+            let v = self.env().vars.get(k) ?? "";
             if (v.length() >= 4) {
                 out = out.replace_all(v, `«ENV:${k}»`);
             }
@@ -828,7 +789,7 @@ class Runtime {
         out
     }
     function scrub_json(self, value: json) -> json throws never {
-        if (self.env.vars.length() == 0) {
+        if (self.env().vars.length() == 0) {
             return value;
         }
         jparse(self.scrub(jstr(value)))
@@ -836,22 +797,22 @@ class Runtime {
 
     // ───────────── env vault ─────────────
     function set_env(self, name: string, value: string) -> void throws never {
-        self.env.vars.set(name, value);
+        self.env().vars.set(name, value);
         self.persist_env();
         for (let l in self.listeners) {
-            l.on_env(self.env.vars.keys());
+            l.on_env(self.env().vars.keys());
         }
     }
     function delete_env(self, name: string) -> bool throws never {
-        let had = self.env.vars.delete(name) != null;
+        let had = self.env().vars.delete(name) != null;
         self.persist_env();
         for (let l in self.listeners) {
-            l.on_env(self.env.vars.keys());
+            l.on_env(self.env().vars.keys());
         }
         had
     }
     function persist_env(self) -> void throws never {
-        baml.fs.write(".codemode/env.json", jstr(self.env.vars)) catch_all (e) {
+        baml.fs.write(".codemode/env.json", jstr(self.env().vars)) catch_all (e) {
             _ => {
                 log.warn(`could not persist env: ${e}`);
                 0
@@ -875,7 +836,7 @@ class Runtime {
             _ => "{}"
         };
         let empty: map<string, string> = {};
-        self.env.vars
+        self.env().vars
             = baml.json.from_string<map<string, string>>(text) catch_all (e) {
                 _ => empty
             };
@@ -900,7 +861,7 @@ class Runtime {
                 self.scrub(l)
             });
         exec.updated_at = baml.time.Instant.now().to_string();
-        for (let c in self.connectors) {
+        for (let c in self.root.all()) {
             c.dispose_execution(exec.id);
         }
         self.persist();
@@ -908,16 +869,18 @@ class Runtime {
     }
 
     // ───────────── the interception point ─────────────
-    // Generated code calls a façade method; the façade calls this. The runtime
-    // assigns the sequence number and decides: replay, execute, or pause.
+    // A connector's typed method calls this (via `call` in connectors/connector.baml)
+    // with a closure that does the work. The runtime assigns the sequence number
+    // and decides: replay from the log, run the closure, or pause for the user.
 
-    function on_call(
+    function call<T>(
         self,
         exec: Execution,
         connector: string,
         method: string,
         args: json,
-    ) -> json throws PausedForApproval | ReplayDivergence | ConnectorError {
+        run: () -> T throws ConnectorError,
+    ) -> T throws PausedForApproval | ReplayDivergence | ConnectorError {
         if (exec.status != ExecutionStatus.Running) {
             throw ConnectorError { connector: connector, method: method, message: `execution is ${exec.status}, not running` };
         }
@@ -925,18 +888,18 @@ class Runtime {
         let recorded = exec.log.at(seq);
         if (recorded == null) {
             //# First time this seq is reached: record it
-            let m = self.method(connector, method);
-            if (m == null) {
+            let t = self.tool(connector, method);
+            if (t == null) {
                 throw ConnectorError { connector: connector, method: method, message: `unknown method ${connector}.${method}; use codemode.search()` };
             }
-            //# A connector may also ask for user input (env: a missing variable)
-            let c = self.connector(connector);
-            let gate = if (c == null) {
+            //# A tool may also ask for user input (env: a missing variable)
+            let gate = t.gate;
+            let reason = if (gate == null) {
                 null
             } else {
-                c.gate(method, args)
+                gate(args)
             };
-            let needs_user = m.requires_approval || gate != null;
+            let needs_user = t.requires_approval || reason != null;
             let entry = LogEntry {
                 seq: seq,
                 kind: "call",
@@ -950,8 +913,8 @@ class Runtime {
                 },
                 result: null,
                 error: null,
-                replay: m.replay,
-                requires_approval: m.requires_approval,
+                replay: t.replay,
+                requires_approval: t.requires_approval,
                 pass: exec.pass_count,
                 recorded_at: baml.time.Instant.now().to_string(),
             };
@@ -959,12 +922,12 @@ class Runtime {
             exec.cursor += 1;
             if (needs_user) {
                 //# Approval or input required: record as pending and abort this pass
-                if (gate != null) {
-                    self.notice(exec, `paused: ${gate ?? ""}`);
+                if (reason != null) {
+                    self.notice(exec, `paused: ${reason ?? ""}`);
                 }
                 self.pause(exec, entry);
             }
-            return self.invoke(exec, entry);
+            return self.invoke<T>(exec, entry, run);
         }
         //# Replay: the log must match connector/method/args at this seq
         if (
@@ -980,17 +943,21 @@ class Runtime {
             CallState.Applied => {
                 if (recorded.replay == ReplayPolicy.Reexecute) {
                     //# reexecute policy: nothing stored, run the read again
-                    return self.invoke(exec, recorded);
+                    return self.invoke<T>(exec, recorded, run);
                 }
                 exec.logs.push(`#${seq} ${connector}.${method} replayed from log`);
                 if (recorded.error != null) {
                     throw ConnectorError { connector: connector, method: method, message: recorded.error ?? "" };
                 }
-                recorded.result
+                baml.json.to<T>(recorded.result) catch (e) {
+                    baml.json.DecodeError => {
+                        throw ConnectorError { connector: connector, method: method, message: `logged result did not decode: ${e.message}` };
+                    },
+                }
             },
             CallState.Approved => {
                 //# The user approved exactly this action: execute it now
-                self.invoke(exec, recorded)
+                self.invoke<T>(exec, recorded, run)
             },
             CallState.Pending => self.pause(exec, recorded),
             _ => {
@@ -1046,28 +1013,34 @@ class Runtime {
         self.notify(exec);
     }
 
-    function invoke(self, exec: Execution, entry: LogEntry) -> json throws ConnectorError {
+    function invoke<T>(
+        self,
+        exec: Execution,
+        entry: LogEntry,
+        run: () -> T throws ConnectorError,
+    ) -> T throws ConnectorError {
         entry.state = CallState.Executing;
-        let c = self.connector(entry.connector);
-        let r = if (c == null) {
-            fail(`connector ${entry.connector} unavailable`)
-        } else {
-            c.call(entry.method, entry.args, exec.id)
+        let value = run() catch (e) {
+            ConnectorError => {
+                entry.state = CallState.Applied;
+                entry.error = e.message;
+                entry.result = null;
+                self.persist();
+                self.notify(exec);
+                throw ConnectorError { connector: entry.connector, method: entry.method, message: e.message };
+            },
         };
         entry.state = CallState.Applied;
-        entry.error = r.error;
+        entry.error = null;
         entry.result
             = if (entry.replay == ReplayPolicy.Reexecute) {
                 null
             } else {
-                r.value
+                j(value)
             };
         self.persist();
         self.notify(exec);
-        if (!r.ok) {
-            throw ConnectorError { connector: entry.connector, method: entry.method, message: r.error ?? "connector error" };
-        }
-        r.value
+        value
     }
 
     function pause(self, exec: Execution, entry: LogEntry) -> never throws PausedForApproval {
@@ -1158,13 +1131,13 @@ class Runtime {
 }
 
 function create_runtime(
-    connectors: Connector[],
+    root: Registry = default_connectors(),
     name: string = "default",
     max_executions: int = 50,
 ) -> Runtime {
     let rt = Runtime {
         name: name,
-        connectors: connectors,
+        root: root,
         executions: [],
         snippets: [],
         max_executions: max_executions,
@@ -1174,11 +1147,9 @@ function create_runtime(
         max_fixes: 3,
         packages: {},
         reference: "",
-        env: Env { vars: {} },
     };
     rt.load();
     rt.load_env();
-    rt.connectors.push(rt.env);
     rt
 }
 

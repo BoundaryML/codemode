@@ -2,7 +2,7 @@
 
 A reproduction of Cloudflare's [Code Mode](https://developers.cloudflare.com/agents/tools/codemode/how-it-works/)
 where **everything runs inside one BAML process**: the model writes **BAML**, the server compiles it at
-runtime with `reflect.Package.compile`, runs it in-process against typed connector façades, and keeps a
+runtime with `reflect.Package.compile`, runs it in-process against typed connectors, and keeps a
 durable execution log with approvals via abort-and-replay, replay-divergence detection, rollback, and
 snippets. The React page in `web/` is only a view: it receives every state change as an event over a
 WebSocket (`/ws`) and sends commands back on it. No polling, no code in the browser.
@@ -10,8 +10,8 @@ WebSocket (`/ws`) and sends commands back on it. No polling, no code in the brow
 ```
  model ──AgentStep{code}──▶ BAML server ──reflect.Package.compile(code, {host: current()})──▶ run(codemode)
                                 │                                                                │
-                                │   codemode.crm.list_customers(plan = "pro")  ◀── typed façade ─┘
-                                │   Runtime.on_call → seq #n → replay | execute | throw PausedForApproval
+                                │   codemode.crm.list_customers(plan = "pro")  ◀── typed method ─┘
+                                │   Runtime.call<T> → seq #n → replay | execute | throw PausedForApproval
                                 │
                           web/ (Vite+React) ◀── events over /ws (or /api/events SSE) ── commands ──▶
 ```
@@ -46,8 +46,8 @@ results, logs, and error messages before they reach the model or the page.
 ## What to show
 
 1. **One tool, discovered by code.** The model's first program calls `codemode.search("…")` and
-   `codemode.describe("billing")`; `describe` renders real BAML declarations from `reflect.signature`
-   and `reflect.Type.of<T>()` (`baml_src/sandbox.baml`). The catalog never enters the prompt.
+   `codemode.describe("billing")`; `describe` renders real BAML declarations with `reflect.signature`
+   over the connector's own methods (`baml_src/codemode.baml`). The catalog never enters the prompt.
 2. **The model writes BAML.** `function run(codemode: host.Codemode) -> AnyType { … }`: it can return a
    class it defines in the same source; the runtime calls `.to_json()` on whatever comes back.
 3. **Compile errors are repaired in place.** If the source doesn't compile, `Runtime.run_pass` runs an
@@ -58,11 +58,11 @@ results, logs, and error messages before they reach the model or the page.
    that is passed into every later compile as a dependency. The model calls `enterprise_names.run(codemode)`
    with real types, `describe("enterprise_names")` renders its functions from `Package.functions()`, and
    the Tools tab lists them next to the connector methods.
-5. **Tools are listed by reflection.** The Tools tab is built from `reflect.signature` on each façade
+5. **Tools are listed by reflection.** The Tools tab is built from `reflect.signature` on each connector
    method (name, parameters, defaults, return type, `///` docstring) plus each snippet package's
    functions. Tools the model has looked up in the current session are marked *found*.
-6. **Approvals = abort + replay.** `email.send`, `update_plan`, `issue_refund` need approval. The façade
-   call reaches `Runtime.on_call`, which records the entry as *Pending* and throws `PausedForApproval`;
+6. **Approvals = abort + replay.** `email.send`, `update_plan`, `issue_refund` need approval. The method
+   body reaches `Runtime.call<T>`, which records the entry as *Pending* and throws `PausedForApproval`;
    the pass unwinds. Approve → the same code runs again; earlier calls are answered from the log
    (dimmed, "answered from log"), the approved call executes, the code continues.
 7. **Deterministic replay.** Same seq must see the same connector/method/args (structural `==`), or
@@ -77,11 +77,46 @@ results, logs, and error messages before they reach the model or the page.
 | file | role |
 |---|---|
 | `baml_src/agent.baml` | `NextStep` and `FixCode` LLM functions, the shared `codemode_surface` / `baml_cheatsheet` prompt text, the agent loop on a detached green thread, sessions, WebSocket/SSE fan-out |
-| `baml_src/sandbox.baml` | `Codemode` object handed to generated code: `search/describe/step/run` + typed façades `crm/billing/email/github`; `compile_run` via reflection |
-| `baml_src/runtime.baml` | `Runtime`: executions, `LogEntry` with seq/state/pass, `run_pass`, `on_call` (the interception point), approve/reject/rollback, snippets, prune/expire, persistence |
-| `baml_src/connectors.baml` | `Connector` interface (`call`, `revert`, `on_pass_end`, `dispose_execution`) and four connectors with typed results |
+| `baml_src/codemode.baml` | `Codemode`, the object handed to generated code: one field per connector, `search/describe/step/run/publish`; `compile_run` and the `describe` renderers |
+| `baml_src/runtime.baml` | `Runtime`: executions, `LogEntry` with seq/state/pass, `run_pass`, `call<T>` (the interception point), approve/reject/rollback, snippets, prune/expire, persistence |
+| `baml_src/connectors/connector.baml` | The `Connector` interface, `Tool` + `tool(self.method, approval = …, revert = …)`, and `call<T>`, the one line every method body goes through |
+| `baml_src/connectors/*.baml` | One file per connector: its result classes, state, seed data, and the class whose typed methods are the API (`crm`, `billing`, `email`, `github`, `env`) |
 | `baml_src/server.baml` | HTTP routes over `baml.http.Server`, typed `StateView` |
 | `web/src/App.tsx` | timeline derived from server state, approvals, Live data / Execution log / Snippets / Tools |
+
+## Adding a connector
+
+One file in `baml_src/connectors/`, then one field, one entry in `all()`, and one line in `bind()` on
+`Codemode`. A connector is a single class: its typed methods *are* its API. Each body wraps its work in
+`call(self.ctx, self.method, args, () -> { … })` so the runtime can log, replay, pause, and roll it back,
+and `tools()` declares policy once, next to the method:
+
+```baml
+class Crm {
+    customers: Customer[],
+    ctx: Ctx?,
+    /// Change a customer's plan. Requires user approval. Reversible.
+    function update_plan(self, id: string, plan: string) -> PlanChange throws PausedForApproval | ReplayDivergence | ConnectorError {
+        call<PlanChange>(self.ctx, self.update_plan, j({ "id": id, "plan": plan }), () -> {
+            let c = self.find(id) ?? throw err(`no customer with id ${id}`);
+            let previous = c.plan;
+            c.plan = as_plan(plan) ?? throw err(`unknown plan ${plan}`);
+            PlanChange { id: id, previous_plan: previous, plan: c.plan }
+        })
+    }
+    function bind(self, rt: Runtime, exec: Execution) -> Crm throws never { Crm { customers: self.customers, ctx: bind_ctx(self, rt, exec) } }
+    implements Connector {
+        function name(self) -> string throws never { "crm" }
+        function description(self) -> string throws never { "Customer records." }
+        function tools(self) -> Tool[] throws never {
+            [tool(self.update_plan, approval = true, revert = (args, result) -> { … })]
+        }
+    }
+}
+```
+
+`reflect.signature(self.update_plan)` supplies the name, docstring, and parameter and return types to
+search, describe, and the Tools tab, so nothing about a method is ever written out as a string.
 
 ## Live events
 

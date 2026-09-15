@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { marked } from "marked";
 import type { Execution, Json, LogEntry, Message, Session, State, ToolView, Turn } from "./api";
 import { useServer, type Command } from "./ws";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
+import { Code } from "./code";
 
 // Stage UI. Left: the story of one task, in order. Right: reference tabs.
 // Everything is derived from server state; the BAML server pushes changes.
@@ -19,7 +21,7 @@ export default function App() {
   const [task, setTask] = useState("");
   const [tab, setTab] = useState<"data" | "tools" | "env" | "history">(() => {
     const t = new URLSearchParams(location.search).get("tab");
-    return t === "tools" || t === "history" || t === "env" ? t : "data";
+    return t === "data" || t === "history" || t === "env" ? t : "tools";
   });
   const [auto, setAuto] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -56,34 +58,39 @@ export default function App() {
     const t = q.get("task"); if (t) start(t);
   }, [online]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (auto && pending) decide("approve"); }, [auto, pending?.seq, current?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [session?.status, session?.turns.length, current?.log.length, current?.pass_count, current?.fix_log.length]);
+  const inSession = !!session;
+  useEffect(() => { if (inSession) scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }, [inSession, session?.id, session?.status, session?.turns.length, current?.log.length, current?.pass_count, current?.fix_log.length]);
 
   const rt = state?.runtime;
+  const layout = useDefaultLayout({ id: "codemode-columns", storage: localStorage, onlySaveAfterUserInteractions: true });
   return (
     <div className="app">
       <header className="top">
-        <h1>Code Mode, in BAML</h1>
-        <span className="sub">The model gets one tool. It writes BAML; the BAML server compiles it, runs it, and pauses for approval.</span>
+        <h1><span className="mark" aria-hidden />Code Mode, in BAML</h1>
+        <span className="sub">The model gets one tool. It writes BAML; the server compiles it, runs it, and pauses for approval.</span>
         <span className="spacer" />
-        <span className="small"><span className={`dot ${online ? "on" : ""}`} />{transport === "websocket" ? "websocket" : transport === "sse" ? "live" : "offline"}</span>
+        <span className={`live ${online ? "on" : ""}`}>{transport === "websocket" ? "live over websocket" : transport === "sse" ? "live" : "offline"}</span>
       </header>
-      <div className="main">
-        <section className="col">
+      <Group className="main" orientation="horizontal" defaultLayout={layout.defaultLayout} onLayoutChanged={layout.onLayoutChanged}>
+        <Panel id="story" className="col story" defaultSize="54" minSize="30">
           <div className="scroll" ref={scrollRef}>
             {!session && <Welcome onPick={start} disabled={busy} />}
             {session && <Story session={session} execById={execById} current={current} pending={pending} onDecide={decide} onEnv={provideEnv} />}
           </div>
-          {session && <div className="chips"><button onClick={fresh}>+ New conversation</button>{SUGGESTIONS.map((s) => <button key={s.task} disabled={busy} onClick={() => start(s.task)}>{s.title}</button>)}</div>}
+          {session && <div className="chips"><button className="new" onClick={fresh}>New conversation</button>{SUGGESTIONS.map((s) => <button key={s.task} disabled={busy} onClick={() => start(s.task)}>{s.title}</button>)}</div>}
           <div className="composer">
-            <textarea value={task} disabled={busy || session?.status === "paused"} placeholder={session ? "Reply… (the model remembers this conversation and its tools)" : "Ask for something that needs a few tools…"} onChange={(e) => setTask(e.target.value)}
+            <textarea rows={1} value={task} disabled={busy || session?.status === "paused"} placeholder={session ? "Reply. The model remembers this conversation and its tools." : "Ask for something that needs a few tools"} onChange={(e) => setTask(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); start(task); } }} />
-            <button className="primary" disabled={busy || !task.trim()} onClick={() => start(task)}>{session ? "Send" : "Run"}</button>
+            <button className="send" aria-label={session ? "Send" : "Run"} title={session ? "Send" : "Run"} disabled={busy || !task.trim()} onClick={() => start(task)}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></svg>
+            </button>
           </div>
-        </section>
-        <section className="col">
+        </Panel>
+        <Separator className="divider" aria-label="Resize the columns" />
+        <Panel id="ref" className="col ref" minSize="28">
           <div className="tabs">
             <button className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}>Live data</button>
-            <button className={tab === "tools" ? "active" : ""} onClick={() => setTab("tools")}>Tools{rt && discovered.size ? ` (${discovered.size} found)` : ""}</button>
+            <button className={tab === "tools" ? "active" : ""} onClick={() => setTab("tools")}>Tools{rt && rt.snippets.length > 0 && <span className="count" title="made by the model">{rt.snippets.length} made</span>}</button>
             <button className={tab === "env" ? "active" : ""} onClick={() => setTab("env")}>Env{rt?.env.length ? ` (${rt.env.length})` : ""}</button>
             <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>History</button>
           </div>
@@ -94,8 +101,8 @@ export default function App() {
               : tab === "env" ? <EnvTab names={rt.env} send={send} />
               : <History state={rt} send={send} />}
           </div>
-        </section>
-      </div>
+        </Panel>
+      </Group>
     </div>
   );
 }
@@ -132,9 +139,9 @@ function Story({ session, execById, current, pending, onDecide, onEnv }: {
     <>
       {items.map((it, i) => it.kind === "msg"
         ? (it.m.role === "user"
-          ? <p className="you" key={i}>{it.m.text}</p>
-          : <div className="step" key={i}><div className="label">Answer</div><div className="answer" dangerouslySetInnerHTML={{ __html: marked.parse(it.m.text, { async: false }) as string }} /></div>)
-        : <Step key={it.ex.id} n={it.n} thought={it.thought} ex={it.ex} open={it === lastStep} />)}
+          ? <div className="you" key={i}><p>{it.m.text}</p></div>
+          : <div className="answer" key={i}><div className="who">Answer</div><div className="prose" dangerouslySetInnerHTML={{ __html: marked.parse(it.m.text, { async: false }) as string }} /></div>)
+        : <Step key={it.ex.id} n={it.n} thought={it.thought} ex={it.ex} open={it === lastStep} live={it.latest} tail={items[i + 1]?.kind !== "step"} />)}
       {pending && current && (pending.connector === "env" ? <EnvPrompt p={pending} onEnv={onEnv} onReject={() => onDecide("reject")} /> : <Approval p={pending} onDecide={onDecide} />)}
       {session.status === "thinking" && <p className="working"><span className="spin" />{session.turns.length ? "Model is reading the result and deciding what to do next…" : "Model is writing code…"}</p>}
       {session.status === "executing" && !pending && <p className="working"><span className="spin" />Compiling and running…</p>}
@@ -143,27 +150,27 @@ function Story({ session, execById, current, pending, onDecide, onEnv }: {
   );
 }
 
-function Step({ n, thought, ex, open }: { n: number; thought: string; ex: Execution; open: boolean }) {
+function Step({ n, thought, ex, open, live, tail }: { n: number; thought: string; ex: Execution; open: boolean; live: boolean; tail: boolean }) {
   const [showCode, setShowCode] = useState(open);
   useEffect(() => setShowCode(open), [open]);
   const replaying = ex.pass_count > 1;
   return (
-    <div className="step">
-      <div className="label">Step {n} · model wrote code</div>
+    <div className={`step ${live ? "current" : ""} ${tail ? "tail" : ""}`}>
+      <div className="label">Step {n} <b>The model wrote code</b></div>
       <p className="thought">{thought}</p>
       {ex.fix_log.map((f) => <FixBox key={f.attempt} f={f} />)}
-      {showCode ? <pre>{ex.code}</pre> : <button className="link" onClick={() => setShowCode(true)}>show code</button>}
+      {showCode ? <Code src={ex.code} /> : <button className="link quiet" onClick={() => setShowCode(true)}>Show the code</button>}
       {(ex.log.length > 0 || ex.discovered.length > 0) && (
         <>
-          <div className="label" style={{ marginTop: 14 }}>{replaying ? `Ran it again (attempt ${ex.pass_count}) · earlier calls answered from the log` : "Ran it"}</div>
+          <div className="runlabel">{replaying ? `Ran it again (attempt ${ex.pass_count}). Earlier calls were answered from the log.` : "Ran it"}</div>
           <ul className="calls">
-            {ex.discovered.length > 0 && <li className="discover"><span className="arrow">🔎</span><span className="what">looked up {ex.discovered.length} tools: {ex.discovered.join(", ")}</span></li>}
+            {ex.discovered.length > 0 && <li className="discover"><span className="glyph">?</span><span className="what">looked up {ex.discovered.length} tool{ex.discovered.length === 1 ? "" : "s"}: {ex.discovered.join(", ")}</span></li>}
             {ex.log.map((e) => <CallRow key={e.seq} e={e} ex={ex} />)}
           </ul>
         </>
       )}
-      {ex.status === "Completed" && ex.publish_as && <div className="fixbox" style={{ background: "#e8f7ee", borderColor: "var(--green)" }}><b>Published tool "{ex.publish_as}"</b> — {ex.publish_description}. Later code can call {ex.publish_as}.&lt;function&gt;(…); see the Tools tab.</div>}
-      {ex.status === "Completed" && <div className="returned">Returned: <code>{short(ex.result, 160)}</code>{JSON.stringify(ex.result ?? null).length > 160 && <details><summary className="small muted">full result</summary><pre>{JSON.stringify(ex.result, null, 1)}</pre></details>}</div>}
+      {ex.status === "Completed" && ex.publish_as && <div className="published"><b>New tool: {ex.publish_as}</b>. {ex.publish_description} Later code can call <code>{ex.publish_as}.run(codemode)</code>. It is listed under "Made by the model" in the Tools tab.</div>}
+      {ex.status === "Completed" && <div className="returned">Returned <code>{short(ex.result, 160)}</code>{JSON.stringify(ex.result ?? null).length > 160 && <details><summary>full result</summary><Code src={JSON.stringify(ex.result, null, 1)} lang="json" /></details>}</div>}
       {ex.status === "Error" && <div className="errbox">Failed: {ex.error}</div>}
       {ex.status === "Rejected" && <div className="errbox">You rejected {ex.log.find((e) => e.state === "Rejected")?.method ?? "the action"}. Earlier calls stayed applied.</div>}
     </div>
@@ -174,7 +181,7 @@ function FixBox({ f }: { f: Execution["fix_log"][number] }) {
   return (
     <div className="fixbox">
       <b>Didn't compile.</b> The model fixed it (attempt {f.attempt}): <i>{f.thought}</i>
-      <details><summary className="small muted">broken code and compiler errors</summary><pre>{f.code}</pre><pre style={{ color: "var(--red)" }}>{f.diagnostics}</pre></details>
+      <details><summary>broken code and compiler errors</summary><Code src={f.code} /><pre style={{ color: "var(--red)" }}>{f.diagnostics}</pre></details>
     </div>
   );
 }
@@ -185,10 +192,10 @@ function CallRow({ e, ex }: { e: LogEntry; ex: Execution }) {
   const call = e.kind === "step" ? `step "${e.method}"` : `${e.connector}.${e.method}(${argList(e.args)})`;
   const got = waiting ? "needs your approval" : e.state === "Rejected" ? "rejected" : e.error ? e.error : e.replay === "Reexecute" ? "re-run" : summary(e.result);
   return (
-    <li className={`${replayed ? "replay" : ""} ${waiting ? "wait" : ""}`}>
-      <span className="arrow">{waiting ? "⏸" : e.error || e.state === "Rejected" ? "✕" : replayed ? "↺" : "→"}</span>
+    <li className={`${replayed ? "replay" : ""} ${waiting ? "wait" : ""} ${e.error || e.state === "Rejected" ? "bad" : ""}`}>
+      <span className="glyph">{waiting ? "‖" : e.error || e.state === "Rejected" ? "×" : replayed ? "↺" : "·"}</span>
       <span className="what">{call}</span>
-      <span className="got">{replayed ? "↺ from log · " : "→ "}{got}</span>
+      <span className="got">{replayed ? "from the log, " : ""}{got}</span>
     </li>
   );
 }
@@ -197,10 +204,10 @@ function Approval({ p, onDecide }: { p: LogEntry; onDecide: (d: "approve" | "rej
   const args = (p.args && typeof p.args === "object" && !Array.isArray(p.args) ? p.args : {}) as Record<string, Json>;
   return (
     <div className="approve">
-      <h2>⏸ Paused. The code wants to call {p.connector}.{p.method}</h2>
+      <h2>Paused. The code wants to call <code>{p.connector}.{p.method}</code></h2>
       <dl className="fields">{Object.entries(args).map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{typeof v === "string" ? v : JSON.stringify(v)}</dd></div>)}</dl>
       <div className="actions"><button className="ok" onClick={() => onDecide("approve")}>Approve</button><button className="danger" onClick={() => onDecide("reject")}>Reject</button></div>
-      <p className="small muted" style={{ margin: "12px 0 0" }}>Approve re-runs the same code. The {p.seq} earlier call{p.seq === 1 ? "" : "s"} are answered from the log; this one executes for real.</p>
+      <p className="hint">Approve re-runs the same code. The {p.seq} earlier call{p.seq === 1 ? " is" : "s are"} answered from the log; this one executes for real.</p>
     </div>
   );
 }
@@ -210,8 +217,8 @@ function EnvPrompt({ p, onEnv, onReject }: { p: LogEntry; onEnv: (name: string, 
   const [value, setValue] = useState("");
   return (
     <div className="approve">
-      <h2>⏸ Paused. The code needs the environment variable {name}</h2>
-      <p className="small muted" style={{ margin: "0 0 10px" }}>Enter it here, not in the chat. It is stored in the server's vault, never shown to the model, and redacted from results.</p>
+      <h2>Paused. The code needs the environment variable <code>{name}</code></h2>
+      <p className="hint" style={{ margin: "0 0 12px" }}>Enter it here, not in the chat. It is stored in the server's vault, never shown to the model, and redacted from results.</p>
       <div className="actions">
         <input type="password" className="envinput" placeholder={`value for ${name}`} value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && value) onEnv(name, value); }} autoFocus />
         <button className="ok" disabled={!value} onClick={() => onEnv(name, value)}>Save and continue</button>
@@ -226,7 +233,7 @@ function EnvTab({ names, send }: { names: string[]; send: (c: Command) => void }
   const [value, setValue] = useState("");
   const add = () => { if (!name.trim() || !value) return; send({ type: "set_env", name: name.trim(), value }); setName(""); setValue(""); };
   return <>
-    <p className="small muted" style={{ marginTop: 0 }}>Secrets and settings the model's code can read with <code>codemode.env.get("NAME")</code>. Values stay in the BAML server: never shown here, never in the model's context, redacted from results and logs.</p>
+    <p className="note">Secrets and settings the model's code can read with <code>codemode.env.get("NAME")</code>. Values stay in the BAML server: never shown here, never in the model's context, redacted from results and logs.</p>
     <div className="envform">
       <input className="envinput" placeholder="NAME" value={name} onChange={(e) => setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))} />
       <input className="envinput" type="password" placeholder="value" value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }} />
@@ -234,7 +241,7 @@ function EnvTab({ names, send }: { names: string[]; send: (c: Command) => void }
     </div>
     {names.length === 0 ? <div className="empty">Nothing set. Start the server with <code>CODEMODE_ENV_IMPORT=GITHUB_TOKEN</code> to import from the process environment, or add one above.</div>
       : <table><thead><tr><th>name</th><th>value</th><th></th></tr></thead><tbody>
-        {names.map((n) => <tr key={n}><td className="mono">{n}</td><td className="muted">••••••••</td><td><button className="link" style={{ color: "var(--red)" }} onClick={() => { if (confirm(`Delete ${n}?`)) send({ type: "delete_env", name: n }); }}>delete</button></td></tr>)}
+        {names.map((n) => <tr key={n}><td className="mono">{n}</td><td className="muted">••••••••</td><td><button className="link del" onClick={() => { if (confirm(`Delete ${n}?`)) send({ type: "delete_env", name: n }); }}>delete</button></td></tr>)}
       </tbody></table>}
   </>;
 }
@@ -246,16 +253,16 @@ function Data({ state }: { state: State["runtime"] }) {
   const customers = world("crm"), invoices = world("billing"), emails = world("email");
   return (
     <>
-      <h3>Customers</h3>
+      <div className="sec"><h3>Customers</h3><span className="n">{customers.length}</span></div>
       <table><thead><tr><th>name</th><th>plan</th><th>notes</th></tr></thead><tbody>
         {customers.map((c) => <tr key={String(c.id)}><td>{String(c.name)}<div className="muted small">{String(c.email)}</div></td><td>{String(c.plan)}</td><td className="small">{(c.notes as string[]).map((n, i) => <div key={i}>{n}</div>)}</td></tr>)}
       </tbody></table>
-      <h3>Invoices</h3>
+      <div className="sec"><h3>Invoices</h3><span className="n">{invoices.length}</span></div>
       <table><thead><tr><th>invoice</th><th>customer</th><th>amount</th><th>status</th></tr></thead><tbody>
         {invoices.map((i) => <tr key={String(i.id)}><td className="mono">{String(i.id)}</td><td>{customers.find((c) => c.id === i.customer_id)?.name as string ?? String(i.customer_id)}</td><td>${Number(i.amount).toFixed(0)}</td><td className={`status ${String(i.status)}`}>{String(i.status)}</td></tr>)}
       </tbody></table>
-      <h3>Sent emails ({emails.length})</h3>
-      {emails.length === 0 ? <div className="muted">none yet</div> :
+      <div className="sec"><h3>Sent emails</h3><span className="n">{emails.length}</span></div>
+      {emails.length === 0 ? <div className="empty">None yet. Emails the model's code sends show up here.</div> :
         emails.map((m, i) => <div className="email" key={i}><b>{String(m.subject)}</b> <span className="muted">to {String(m.to)}</span><div className="body">{String(m.body)}</div></div>)}
     </>
   );
@@ -263,36 +270,49 @@ function Data({ state }: { state: State["runtime"] }) {
 
 function Tools({ tools, snippets, discovered, send }: { tools: ToolView[]; snippets: State["runtime"]["snippets"]; discovered: Set<string>; send: (c: Command) => void }) {
   const [open, setOpen] = useState<string | null>(null);
-  const groups = [...new Set(tools.map((t) => t.connector))];
   const remove = (name: string) => { if (confirm(`Delete tool "${name}"? Code that imports it will stop compiling.`)) send({ type: "delete_tool", name }); };
+  const builtin = tools.filter((t) => t.kind === "method");
+  const connectors = [...new Set(builtin.map((t) => t.connector))];
+  const row = (t: ToolView) => (
+    <div className={`tool ${discovered.has(t.path) ? "found" : ""}`} key={t.path}>
+      <div className="sig"><b>{t.name}</b>{t.signature.slice(t.name.length)}{t.requires_approval && <span className="tag approval">needs approval</span>}{discovered.has(t.path) && <span className="tag found">looked up in this task</span>}</div>
+      {t.kind === "method" && t.docstring && <div className="doc">{t.docstring}</div>}
+    </div>
+  );
   return <>
-    <p className="small muted" style={{ marginTop: 0 }}>Listed by reflection over the BAML code. The model does not see this list; it searches for tools and reads their signatures. Highlighted = looked up in this task.</p>
-    {groups.map((g) => {
-      const sn = snippets.find((x) => x.name === g);
-      return (
-        <div key={g}>
-          <h3>{g}{sn ? " · tool the model made" : ""}
-            {sn && <span style={{ marginLeft: 12, textTransform: "none", letterSpacing: 0 }}>
-              <button className="link" onClick={() => setOpen(open === g ? null : g)}>{open === g ? "hide source" : "view source"}</button>
-              <span> · </span>
-              <button className="link" style={{ color: "var(--red)" }} onClick={() => remove(g)}>delete</button>
-            </span>}
-          </h3>
-          {sn && open === g && (
-            <div className="toolsrc">
-              <div className="small muted">{sn.description} · saved from {sn.source_execution_id} · {new Date(sn.created_at).toLocaleString()}</div>
-              <pre>{sn.code}</pre>
-            </div>
-          )}
-          {tools.filter((t) => t.connector === g).map((t) => (
-            <div className={`tool ${discovered.has(t.path) ? "found" : ""}`} key={t.path}>
-              <div className="sig"><b>{t.name}</b>{t.signature.slice(t.name.length)}{t.requires_approval && <span className="tag approval">approval</span>}{discovered.has(t.path) && <span className="tag found">found</span>}</div>
-              {t.docstring && <div className="doc">{t.docstring}</div>}
-            </div>
-          ))}
+    <section className="toolset made">
+      <div className="head"><h3>Made by the model</h3><span className="n">{snippets.length === 0 ? "none yet" : snippets.length}</span></div>
+      <p className="why">Programs the model wrote during a task, compiled into typed packages it can call later.</p>
+      {snippets.length === 0 && (
+        <div className="made-empty">Nothing yet. When a run finishes, <b>Save as snippet</b> in History turns it into a tool, or the model can publish one itself. It will appear here and become searchable.</div>
+      )}
+      {snippets.map((sn) => (
+        <div className="made-tool" key={sn.name}>
+          <div className="mhead">
+            <span className="name">{sn.name}</span>
+            <span className="acts">
+              <button className="link" onClick={() => setOpen(open === sn.name ? null : sn.name)}>{open === sn.name ? "Hide source" : "View source"}</button>
+              <button className="link del" onClick={() => remove(sn.name)}>Delete</button>
+            </span>
+          </div>
+          <div className="desc">{sn.description}</div>
+          <div className="meta">From run {sn.source_execution_id}, {new Date(sn.created_at).toLocaleString()}</div>
+          {open === sn.name && <div className="toolsrc"><Code src={sn.code} /></div>}
+          {tools.filter((t) => t.kind === "snippet" && t.connector === sn.name).map(row)}
         </div>
-      );
-    })}
+      ))}
+    </section>
+
+    <section className="toolset">
+      <div className="head"><h3>Built in</h3><span className="n">{builtin.length} across {connectors.length} connectors</span></div>
+      <p className="why">Declared in the server's own BAML source. They exist before any task runs.</p>
+      {connectors.map((c) => (
+        <div className="connector" key={c}>
+          <div className="cname">{c}</div>
+          <div>{builtin.filter((t) => t.connector === c).map(row)}</div>
+        </div>
+      ))}
+    </section>
   </>;
 }
 
@@ -303,13 +323,13 @@ function History({ state, send }: { state: State["runtime"]; send: (c: Command) 
     send({ type: "save_snippet", execution_id: ex.id, name, description: prompt("One-line description:", ex.task) ?? ex.task });
   };
   return <>
-    <p className="small muted" style={{ marginTop: 0 }}>Every run BAML recorded. Roll back undoes a run's calls in reverse order. Save as snippet turns a run into a tool the model can call.</p>
+    <p className="note">Every run BAML recorded. Roll back undoes a run's calls in reverse order. Save as snippet turns a run into a tool the model can call.</p>
     {state.executions.map((ex) => (
       <div className="hist" key={ex.id}>
         <div className="head"><span className={`status ${ex.status === "Completed" ? "paid" : ex.status === "Error" || ex.status === "Rejected" ? "overdue" : ex.status === "RolledBack" ? "refunded" : ""}`}>{statusText(ex.status)}</span><b>{ex.id}</b><span className="muted small">{ex.pass_count} attempt{ex.pass_count === 1 ? "" : "s"} · {ex.log.length} calls{ex.fix_log.length ? ` · ${ex.fix_log.length} fix` : ""}</span></div>
         <div className="task">{ex.task || "direct run"}</div>
-        <details><summary className="small muted">code and calls</summary>
-          <pre>{ex.code}</pre>
+        <details><summary>code and calls</summary>
+          <Code src={ex.code} />
           <ul className="calls">{ex.log.map((e) => <CallRow key={e.seq} e={e} ex={ex} />)}</ul>
         </details>
         <div className="actions">
