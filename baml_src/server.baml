@@ -70,6 +70,7 @@ function tool_detail(app: App, name: string) -> ToolDetail? {
 
 function state_view(app: App) -> StateView {
     let rt = app.runtime;
+    //# The page's snapshot: connector worlds, reflected tools, executions, saved tools, env names
     let connectors = rt.root.all().map((c) -> {
         ConnectorView {
             name: c.name(),
@@ -165,6 +166,7 @@ function ws_upgrade(app: App, req: baml.http.Request) -> baml.http.Response | ba
     if (req.url.split("?")[0] != "/ws") {
         return baml.http.reject_websocket(req);
     }
+    //# One socket per browser tab: send a snapshot, then read commands until it closes
     (socket: baml.ws.WebSocket) -> {
         app.sockets.push(socket);
         defer {
@@ -206,6 +208,7 @@ function ws_command(app: App, socket: baml.ws.WebSocket, text: string) -> void {
             _ => null
         };
     };
+    //# Commands from the page; long-running ones run detached so this socket keeps reading
     match (kind) {
         "start" => {
             let task = body_str(msg, "task").trim();
@@ -304,7 +307,7 @@ function handle(app: App, req: baml.http.Request) -> baml.http.Response {
     if (method == "OPTIONS") {
         return baml.http.Response.new(204, cors(), "".to_utf8());
     }
-
+    //# HTTP API: state snapshot, SSE events, sessions, executions, env vault, tools, snippets
     if (method == "GET" && path == "/api/state") {
         return respond(200, state_view(app));
     }

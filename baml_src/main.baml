@@ -38,6 +38,7 @@ function main() -> void {
             app.keepalive();
         }
     };
+    //# Serve HTTP + WebSocket until the process is killed
     server.serve(
         (req) -> {
             handle(app, req) catch_all (e, ctx) {

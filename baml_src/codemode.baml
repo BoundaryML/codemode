@@ -71,6 +71,7 @@ class Codemode {
         if (ctx == null) {
             return SearchResult { results: [], total: 0, truncated: false };
         }
+        //# Discovery: rank connector methods and saved tools; remember what the model looked up
         let r = ctx.rt.search(query);
         ctx.exec.logs.push(`search(${jstr(query)}) → ${r.total} result(s)`);
         for (let h in r.results) {
@@ -81,6 +82,7 @@ class Codemode {
     /// Make this source's functions available to future code as package `name`
     /// (saved when this execution completes). Returns the package alias.
     function publish(self, name: string, description: string) -> string throws never {
+        //# Publish only flags this execution; the runtime saves the package when the run completes
         let alias = identifier(name);
         let ctx = self.ctx;
         if (ctx != null) {
@@ -106,6 +108,7 @@ class Codemode {
         if (ctx == null) {
             return "// not bound to an execution";
         }
+        //# Stdlib paths go to `baml describe`; connectors and saved tools render from reflection
         if (target.starts_with("baml.") || target.starts_with("reflect.") || target == "baml") {
             ctx.exec.logs.push(`describe(${jstr(target)}) → stdlib docs`);
             self.discover(target);
@@ -138,6 +141,7 @@ class Codemode {
     /// `enterprise_names.run(codemode)` is the typed form.) Calls join this execution's log.
     function run(self, name: string, input: json = null) -> json throws unknown {
         let ctx = self.ctx ?? throw err("codemode is not bound to an execution");
+        //# Call a saved tool by name; its connector calls join this execution's log
         let pkg = ctx.rt.snippet_package(identifier(name));
         if (pkg == null) {
             return j({ "error": `no snippet named ${name}` });
@@ -181,6 +185,7 @@ function compile_package(
             packages.set(k, d);
         }
     }
+    //# Compile model code against this package (as `host`) plus every saved tool's package
     packages.set("host", reflect.Package.current());
     reflect.Package.compile({ "run.baml": source }, packages = packages) catch_all (e) {
         let c: reflect.errors.CompilationError => {
@@ -213,6 +218,7 @@ function call_run(
     f: reflect.AnyFunction<Returns = unknown, Throws = unknown>,
     codemode: Codemode,
 ) -> unknown throws unknown {
+    //# Hand the bound Codemode to run(), whatever the model named the parameter
     let sig = reflect.signature(f);
     let param = sig.args.at(0)?.name ?? "codemode";
     let args: map<string, unknown> = {};
@@ -249,6 +255,7 @@ function render_signature(sig: reflect.Signature) -> string {
 
 /// A connector's BAML declaration plus the classes its methods return.
 function render_connector(c: Connector, only: string) -> string {
+    //# describe(): a BAML class declaration built from the tools' real signatures
     let tools = c.tools().filter((t) -> {
         only == "" || t.name() == only
     });

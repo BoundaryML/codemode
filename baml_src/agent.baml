@@ -369,6 +369,7 @@ class App {
     }
 
     function start_session(self, task: string) -> Session throws never {
+        //# New conversation: one Session with the first user message, then the agent loop
         let now = baml.time.Instant.now().to_string();
         let s = Session {
             id: self.runtime.fresh_id("sess"),
@@ -404,6 +405,7 @@ class App {
         ) {
             return null;
         }
+        //# Follow-up message: append it and wake the loop again
         s.messages.push(Message { role: "user", text: text });
         s.status = "thinking";
         s.answer = null;
@@ -428,6 +430,7 @@ class App {
     /// The agent loop: ask the model, run its code, feed the outcome back, until
     /// it answers, pauses for approval, or hits the step limit.
     function drive(self, s: Session) -> void throws never {
+        //# Agent loop: think (one LLM call) → run code → read the outcome → repeat until it answers or pauses
         while (true) {
             let msg_index = self.last_user_index(s);
             let steps_here = s.turns
@@ -435,6 +438,7 @@ class App {
                     t.message_index == msg_index
                 })
                 .length();
+            //# Safety valve: at most 8 executions per user message
             if (steps_here >= 8) {
                 s.status = "error";
                 s.answer = "Stopped after 8 executions without finishing.";
@@ -471,6 +475,7 @@ class App {
             };
             s.thought = step.thought;
             let code = step.code ?? "";
+            //# Answer: the model is done with tools; reply to the user and stop
             if (step.action != Action.Codemode || code.trim().length() == 0) {
                 s.status = "done";
                 s.answer = step.answer ?? step.thought;
@@ -485,6 +490,7 @@ class App {
             s.status = "executing";
             s.current_execution_id = exec.id;
             self.touch(s);
+            //# First pass: compile + run; the outcome decides whether the loop continues
             let outcome = self.runtime.run_pass(exec);
             if (!self.settle(s, exec, outcome)) {
                 return;
@@ -499,6 +505,7 @@ class App {
         exec: Execution,
         outcome: Completed | Paused | Failed,
     ) -> bool throws never {
+        //# Paused → wait for the user (approve/reject resumes the loop); otherwise record the turn and go again
         match (outcome) {
             let p: Paused => {
                 s.status = "paused";
@@ -538,6 +545,7 @@ class App {
             s.status = "executing";
             self.touch(s);
         }
+        //# Approve: the runtime re-runs the same code; the approved call executes this time
         let outcome = self.runtime.approve(execution_id);
         if (s != null) {
             self.continue_after(s, exec, outcome);
@@ -561,6 +569,7 @@ class App {
         exec: Execution,
         outcome: Completed | Paused | Failed,
     ) -> void throws never {
+        //# After approve/reject: resume the agent loop on its own green thread if there is more to do
         if (self.settle(s, exec, outcome)) {
             spawn with baml.spawn.options(detach = true) { self.drive(s) };
         }
@@ -568,6 +577,7 @@ class App {
 }
 
 function build_app() -> App {
+    //# Boot: connectors → durable runtime → language reference → app with sessions and sockets
     let rt = create_runtime();
     rt.reference = load_reference();
     let app = App {

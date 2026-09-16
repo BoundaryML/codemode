@@ -418,6 +418,7 @@ class Runtime {
                 logs: exec.logs,
             };
         }
+        //# Compiled: bind every connector to this execution and call the model's run()
         let run = compiled;
         let codemode = new_codemode(self, exec);
         //# Run in a green thread so panics are captured too
@@ -445,6 +446,7 @@ class Runtime {
                     logs: exec.logs,
                 }
             },
+            //# The run threw: a pause, a replay divergence, a connector error, or anything else
             let f: baml.future.Failure<unknown> => {
                 match (f.error) {
                     let p: PausedForApproval => {
@@ -579,6 +581,7 @@ class Runtime {
                 skipped: [],
             };
         }
+        //# Rollback: compensate applied calls through each tool's typed revert closure
         let reverted = 0;
         let failures: string[] = [];
         let skipped: string[] = [];
@@ -670,6 +673,7 @@ class Runtime {
 
     /// Remove a saved tool. Executions that used it keep their logs; new code can no longer import it.
     function delete_snippet(self, name: string) -> bool throws never {
+        //# Delete a saved tool: later compiles no longer see its package
         let before = self.snippets.length();
         self.snippets
             = self.snippets.filter((s) -> {
@@ -848,6 +852,7 @@ class Runtime {
         status: ExecutionStatus,
         error: string?,
     ) -> void throws never {
+        //# Terminal state: scrub secrets from result and logs, release connector resources, persist, notify
         exec.status = status;
         exec.error
             = if (error == null) {
@@ -884,6 +889,7 @@ class Runtime {
         if (exec.status != ExecutionStatus.Running) {
             throw ConnectorError { connector: connector, method: method, message: `execution is ${exec.status}, not running` };
         }
+        //# The cursor is this call's sequence number: same code, same order, same seq on every pass
         let seq = exec.cursor;
         let recorded = exec.log.at(seq);
         if (recorded == null) {
@@ -972,6 +978,7 @@ class Runtime {
         exec: Execution,
         name: string,
     ) -> json throws PausedForApproval | ReplayDivergence | ConnectorError {
+        //# codemode.step(): nondeterministic values are recorded once and replayed by cursor, like calls
         let seq = exec.cursor;
         let recorded = exec.log.at(seq);
         if (recorded != null) {
@@ -1019,6 +1026,7 @@ class Runtime {
         entry: LogEntry,
         run: () -> T throws ConnectorError,
     ) -> T throws ConnectorError {
+        //# Execute the tool body for real; record the result or error, then push the change to the UI
         entry.state = CallState.Executing;
         let value = run() catch (e) {
             ConnectorError => {
@@ -1044,6 +1052,7 @@ class Runtime {
     }
 
     function pause(self, exec: Execution, entry: LogEntry) -> never throws PausedForApproval {
+        //# Pause: persist the Pending entry, then unwind the whole pass by throwing
         exec.status = ExecutionStatus.Paused;
         exec.updated_at = baml.time.Instant.now().to_string();
         self.persist();
@@ -1091,6 +1100,7 @@ class Runtime {
 
     // ───────────── persistence (survives restarts, like a DO facet) ─────────────
     function persist(self) -> void throws never {
+        //# Durable log: every state change is written to .codemode/<name>.json
         let state = PersistedState { executions: self.executions, snippets: self.snippets };
         baml.fs.write(self.state_path, jstr(state)) catch_all (e) {
             _ => {
@@ -1100,6 +1110,7 @@ class Runtime {
         };
     }
     function load(self) -> void throws never {
+        //# Boot: reload executions and saved tools from disk
         if (
             !(
                 baml.fs.exists(self.state_path) catch_all (e) {

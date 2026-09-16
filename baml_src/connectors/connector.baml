@@ -85,6 +85,7 @@ function tool(
     revert: ((json, json) -> bool throws never)? = null,
     gate: ((json) -> string? throws never)? = null,
 ) -> Tool throws never {
+    //# Name, docstring, and types come from the method itself; policy is declared here, once
     Tool {
         sig: reflect.signature(f),
         requires_approval: approval,
@@ -121,6 +122,7 @@ function call<T>(
     args: json,
     run: () -> T throws ConnectorError,
 ) -> T throws PausedForApproval | ReplayDivergence | ConnectorError {
+    //# Every connector method body enters the runtime here: seq, replay, approval, logging
     let method = reflect.signature(f).name ?? "?";
     if (ctx == null) {
         throw ConnectorError { connector: "?", method: method, message: "connector is not bound to an execution" };
